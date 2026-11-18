@@ -20,10 +20,13 @@ on:
       build_root:
         description: build the root image (false = userland + shim only)
         default: "true"
+      mac_runner:
+        description: macOS runner for userland (arm64 runners are often out of capacity)
+        default: macos-15-intel
 
 jobs:
   userland:
-    runs-on: macos-15
+    runs-on: ${{ inputs.mac_runner || 'macos-15-intel' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
