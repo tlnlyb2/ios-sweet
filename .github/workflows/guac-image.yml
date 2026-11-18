@@ -59,7 +59,9 @@ jobs:
           retention-days: 7
 
   root:
-    if: inputs.build_root != 'false'
+    # Runs even when no macOS runner was available for userland: the helpers are then left out
+    # (backboardd keeps its own launchd job) and can be installed later through SWEETBOX.
+    if: always() && inputs.build_root != 'false'
     needs: userland
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -84,6 +86,7 @@ jobs:
           lsmod | grep hfsplus
           pip3 install --break-system-packages pyimg4
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: userland-out
           path: userland/out
@@ -129,14 +132,33 @@ jobs:
           sudo fsck.hfsplus -fy "$W/ios16-root.img" || true
           sudo mkdir -p /mnt/iosroot
           sudo mount -t hfsplus -o loop,force "$W/ios16-root.img" /mnt/iosroot
+          LP=/mnt/iosroot/System/Library/xpc/launchd.plist
+          sudo cp -p "$LP" "$W/launchd.plist.orig"
           sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
-          sudo install -o 0 -g 0 -m 0755 userland/out/sweet-bbd userland/out/sweet-autorun /mnt/iosroot/usr/libexec/
-          sudo install -o 0 -g 0 -m 0755 userland/out/libsweet-bbd.dylib /mnt/iosroot/usr/lib/
           sudo install -d -o 0 -g 0 -m 0755 /mnt/iosroot/var/local/bin
-          for b in sweet-sysapps sweet-fs hfsgrow lsreg oslog wland netsvc wifisvc; do
-            [ -f "userland/out/$b" ] && sudo install -o 0 -g 0 -m 0755 "userland/out/$b" /mnt/iosroot/var/local/bin/
-          done
-          ls -la /mnt/iosroot/usr/libexec/sweet-* /mnt/iosroot/usr/lib/libsweet-bbd.dylib
+          if [ -f userland/out/sweet-bbd ]; then
+            sudo install -o 0 -g 0 -m 0755 userland/out/sweet-bbd userland/out/sweet-autorun /mnt/iosroot/usr/libexec/
+            sudo install -o 0 -g 0 -m 0755 userland/out/libsweet-bbd.dylib /mnt/iosroot/usr/lib/
+            for b in sweet-sysapps sweet-fs hfsgrow lsreg oslog wland netsvc wifisvc; do
+              [ -f "userland/out/$b" ] && sudo install -o 0 -g 0 -m 0755 "userland/out/$b" /mnt/iosroot/var/local/bin/
+            done
+            ls -la /mnt/iosroot/usr/libexec/sweet-* /mnt/iosroot/usr/lib/libsweet-bbd.dylib
+          else
+            echo "no userland build: backboardd keeps its stock ProgramArguments; com.sweet.autorun stays (fails harmlessly)"
+            sudo python3 - "$W/launchd.plist.orig" "$LP" <<'EOF'
+          import os, plistlib, sys
+          orig = plistlib.load(open(sys.argv[1], 'rb'))['LaunchDaemons']
+          st = os.stat(sys.argv[2])
+          p = plistlib.load(open(sys.argv[2], 'rb'))
+          for k, j in p['LaunchDaemons'].items():
+              if j.get('Label') == 'com.apple.backboardd':
+                  j['ProgramArguments'] = orig[k]['ProgramArguments']
+                  print('backboardd:', j['ProgramArguments'])
+          with open(sys.argv[2], 'wb') as f:
+              plistlib.dump(p, f, fmt=plistlib.FMT_BINARY)
+          os.chown(sys.argv[2], st.st_uid, st.st_gid); os.chmod(sys.argv[2], st.st_mode & 0o7777)
+          EOF
+          fi
           df -h /mnt/iosroot
           sudo umount /mnt/iosroot
           sudo fsck.hfsplus -fy "$W/ios16-root.img" | grep -v 'Illegal name' || true

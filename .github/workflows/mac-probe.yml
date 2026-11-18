@@ -1,0 +1,13 @@
+name: mac-probe
+# Which macOS runner labels this account can get right now (each job just prints the machine).
+on: workflow_dispatch
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15, macos-26, macos-15-intel, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - run: sw_vers; uname -m; ls -d /Applications/Xcode*.app
