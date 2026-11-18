@@ -71,7 +71,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check key
-        run: test -n "$IMG_KEY" || { echo "IMG_KEY secret missing"; exit 1; }
+        run: |
+          test -n "$IMG_KEY" || { echo "IMG_KEY secret missing"; exit 1; }
+          # fingerprint only (first 12 hex of sha256 of the exact value), to check it against the local key file
+          printf '%s' "$IMG_KEY" | sha256sum | cut -c1-12 | sed 's/^/IMG_KEY fingerprint: /'
+          printf '%s' "$IMG_KEY" | wc -c | sed 's/^/IMG_KEY length: /'
       - name: Free disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
