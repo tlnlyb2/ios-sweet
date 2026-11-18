@@ -81,7 +81,15 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq apfs-fuse hfsprogs rsync pigz android-sdk-libsparse-utils unzip aria2
+          sudo apt-get install -yq hfsprogs rsync pigz android-sdk-libsparse-utils unzip aria2 \
+            cmake g++ libfuse3-dev fuse3 zlib1g-dev libbz2-dev libattr1-dev
+          # apfs-fuse is not packaged for Ubuntu 24.04: build it from upstream (sgan81/apfs-fuse)
+          git clone -q --recursive https://github.com/sgan81/apfs-fuse.git /tmp/apfs-fuse
+          git -C /tmp/apfs-fuse log -1 --format='apfs-fuse %h %ad'
+          cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          make -C /tmp/apfs-fuse/build -j"$(nproc)" apfs-fuse >/dev/null
+          sudo install -m 0755 /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
+          command -v apfs-fuse mkfs.hfsplus fsck.hfsplus img2simg
           sudo modprobe hfsplus || { sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
           lsmod | grep hfsplus
           pip3 install --break-system-packages pyimg4
