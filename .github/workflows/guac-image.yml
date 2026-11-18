@@ -1,0 +1,157 @@
+name: guac-image
+
+# OnePlus 7 Pro (guacamole) pieces besides the kernel (xnu.yml):
+#   userland  macOS: userland/build.sh without Mesa (CPU rendering; boot with sweetgl=0)
+#   shim      Linux: BOARD=guacamole shim/build.sh -> shim Image (pack it with tools/mkguacboot.py)
+#   root      Linux: iPhone X (iPhone10,3) iOS 16.7.16 (20H392) IPSW from Apple -> tools/mkiosroot.sh
+#             -> tools/sweet-root-tweaks.py + userland helpers -> sparse image; plus d22ap.adt for mkadt.py.
+# The root image and device tree are Apple's files: in this public repo they are only uploaded
+# encrypted (openssl aes-256-cbc -pbkdf2, key in the IMG_KEY secret) and kept one day.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: IPSW URL (empty = look up iPhone10,3 20H392 on api.ipsw.me)
+        default: ""
+      root_size:
+        description: HFS+ root image size
+        default: 16G
+      build_root:
+        description: build the root image (false = userland + shim only)
+        default: "true"
+
+jobs:
+  userland:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          xcodebuild -version
+          sh userland/build.sh
+          ls -la userland/out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: userland-out
+          path: userland/out/
+          retention-days: 7
+
+  shim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update -q && sudo apt-get install -yq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu cpio
+      - name: Build
+        run: |
+          BOARD=guacamole shim/build.sh
+          sha256sum shim/out/Image
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-guacamole
+          path: shim/out/Image
+          retention-days: 7
+
+  root:
+    if: inputs.build_root != 'false'
+    needs: userland
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      IMG_KEY: ${{ secrets.IMG_KEY }}
+      W: /mnt/work
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check key
+        run: test -n "$IMG_KEY" || { echo "IMG_KEY secret missing"; exit 1; }
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo mkdir -p "$W" && sudo chown "$USER" "$W"
+          df -h / /mnt
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq apfs-fuse hfsprogs rsync pigz android-sdk-libsparse-utils unzip aria2
+          sudo modprobe hfsplus || { sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe hfsplus; }
+          lsmod | grep hfsplus
+          pip3 install --break-system-packages pyimg4
+      - uses: actions/download-artifact@v4
+        with:
+          name: userland-out
+          path: userland/out
+      - name: Download IPSW
+        run: |
+          URL="${{ inputs.ipsw_url }}"
+          if [ -z "$URL" ]; then
+            URL=$(curl -sf https://api.ipsw.me/v4/ipsw/iPhone10,3/20H392 | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')
+          fi
+          echo "IPSW: $URL"
+          case "$URL" in https://updates.cdn-apple.com/*|https://secure-appldnld.apple.com/*|https://appldnld.apple.com/*) ;; *) echo "not an Apple URL"; exit 1;; esac
+          aria2c -q -x 8 -s 8 -d "$W" -o fw.ipsw "$URL"
+          ls -la "$W/fw.ipsw"
+      - name: Extract images
+        working-directory: /mnt/work
+        run: |
+          unzip -q -o fw.ipsw BuildManifest.plist Firmware/all_flash/DeviceTree.d22ap.im4p
+          python3 - <<'EOF' > names.txt
+          import plistlib
+          m = plistlib.load(open('BuildManifest.plist', 'rb'))
+          ident = next(i for i in m['BuildIdentities'] if i['Info'].get('DeviceClass') == 'd22ap'
+                       and 'Erase' in i['Info'].get('Variant', ''))
+          man = ident['Manifest']
+          print(m['ProductBuildVersion'], m['ProductVersion'])
+          for k in ('OS', 'Cryptex1,SystemOS', 'Cryptex1,AppOS'):
+              print(man[k]['Info']['Path'])
+          EOF
+          cat names.txt
+          read -r BUILD VER < <(sed -n 1p names.txt)
+          test "$BUILD" = 20H392 || { echo "unexpected build $BUILD"; exit 1; }
+          OS=$(sed -n 2p names.txt) SYS=$(sed -n 3p names.txt) APP=$(sed -n 4p names.txt)
+          unzip -q -o fw.ipsw "$OS" "$SYS" "$APP"
+          rm fw.ipsw
+          echo "OS=$W/$OS" >> "$GITHUB_ENV"; echo "SYS=$W/$SYS" >> "$GITHUB_ENV"; echo "APP=$W/$APP" >> "$GITHUB_ENV"
+          pyimg4 im4p extract -i Firmware/all_flash/DeviceTree.d22ap.im4p -o d22ap.adt
+          ls -la . ; df -h /mnt
+      - name: Build root
+        run: |
+          tools/mkiosroot.sh "$OS" "$SYS" "$APP" "$W/ios16-root.img" "${{ inputs.root_size }}"
+          rm -f "$OS" "$SYS" "$APP"
+      - name: Tweaks and userland
+        run: |
+          sudo fsck.hfsplus -fy "$W/ios16-root.img" || true
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force "$W/ios16-root.img" /mnt/iosroot
+          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          sudo install -o 0 -g 0 -m 0755 userland/out/sweet-bbd userland/out/sweet-autorun /mnt/iosroot/usr/libexec/
+          sudo install -o 0 -g 0 -m 0755 userland/out/libsweet-bbd.dylib /mnt/iosroot/usr/lib/
+          sudo install -d -o 0 -g 0 -m 0755 /mnt/iosroot/var/local/bin
+          for b in sweet-sysapps sweet-fs hfsgrow lsreg oslog wland netsvc wifisvc; do
+            [ -f "userland/out/$b" ] && sudo install -o 0 -g 0 -m 0755 "userland/out/$b" /mnt/iosroot/var/local/bin/
+          done
+          ls -la /mnt/iosroot/usr/libexec/sweet-* /mnt/iosroot/usr/lib/libsweet-bbd.dylib
+          df -h /mnt/iosroot
+          sudo umount /mnt/iosroot
+          sudo fsck.hfsplus -fy "$W/ios16-root.img" | grep -v 'Illegal name' || true
+          sudo fsck.hfsplus -fn "$W/ios16-root.img"
+      - name: Sparse, compress, encrypt
+        working-directory: /mnt/work
+        run: |
+          img2simg ios16-root.img ios16-root.simg
+          rm ios16-root.img
+          sha256sum ios16-root.simg d22ap.adt | tee SHA256SUMS
+          mkdir -p out
+          pigz -1 -c ios16-root.simg | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:IMG_KEY -out out/ios16-root.simg.gz.enc
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:IMG_KEY -in d22ap.adt -out out/d22ap.adt.enc
+          cp SHA256SUMS out/
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guac-root-encrypted
+          path: /mnt/work/out/
+          retention-days: 1
+          compression-level: 0
