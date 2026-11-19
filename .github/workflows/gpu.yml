@@ -1,0 +1,43 @@
+name: gpu
+
+# G3/G4 userland for guacamole: Mesa 25.0.7 freedreno (userland/mesa/mk-mesa.sh) and the
+# EAGL-on-Mesa library for backboardd (userland/build.sh builds libsweet-gl.dylib once Mesa exists).
+# Install on the phone as /usr/lib/libOSMesa.8.dylib and /usr/lib/libsweet-gl.dylib, boot with sweetgpu=11.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mac_runner:
+        description: macOS runner (arm64 runners are often out of capacity)
+        default: macos-15-intel
+
+jobs:
+  mesa:
+    runs-on: ${{ inputs.mac_runner || 'macos-15-intel' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deps
+        run: |
+          brew install bison
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
+      - name: Mesa
+        run: |
+          bison --version | head -1
+          userland/mesa/mk-mesa.sh || { tail -60 userland/mesa/build/meson-setup.log userland/mesa/build/ninja.log 2>/dev/null; exit 1; }
+      - name: Userland (with libsweet-gl)
+        run: |
+          sh userland/build.sh
+          ls -la userland/out
+          test -f userland/out/libsweet-gl.dylib
+          shasum -a 256 userland/out/libsweet-gl.dylib userland/out/libOSMesa.8.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu-userland
+          path: |
+            userland/out/libsweet-gl.dylib
+            userland/out/libOSMesa.8.dylib
+            userland/out/libsweet-bbd.dylib
+            userland/out/osmesa-triangle
+          retention-days: 14
