@@ -25,7 +25,7 @@ jobs:
       - name: Mesa
         run: |
           bison --version | head -1
-          userland/mesa/mk-mesa.sh || { tail -60 userland/mesa/build/meson-setup.log userland/mesa/build/ninja.log 2>/dev/null; exit 1; }
+          bash userland/mesa/mk-mesa.sh || { tail -60 userland/mesa/build/meson-setup.log userland/mesa/build/ninja.log 2>/dev/null; exit 1; }
       - name: Userland (with libsweet-gl)
         run: |
           sh userland/build.sh
